@@ -1,0 +1,98 @@
+name: build
+
+on:
+  push:
+    tags: ["v*"]          # タグを付けたときだけ（無料枠の節約）
+  workflow_dispatch:
+    inputs:
+      trial_last_day:
+        description: "検証版の使用期限（空欄なら期限なし）"
+        default: "2026-12-18"
+
+env:
+  TRIAL_LAST_DAY: ${{ github.event.inputs.trial_last_day || '2026-12-18' }}
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, label: Windows, pkg: CT_Titler_Windows }
+          - { os: macos-latest,   label: Mac (Apple Silicon), pkg: CT_Titler_Mac_AppleSilicon }
+          - { os: macos-15-intel, label: Mac (Intel), pkg: CT_Titler_Mac_Intel }
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 部品を入れる
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt pyinstaller
+
+      - name: アイコンを作る
+        run: python tools/make_icon.py icon.png && cp icon.png claps_titler/icon.png
+
+      - name: 動作テスト（Python のまま）
+        shell: bash
+        run: |
+          # Mac は画面なしで、Windows は普通の画面で（Windows の offscreen は日本語フォントを使えないため）
+          if [ "$RUNNER_OS" = "macOS" ]; then export QT_QPA_PLATFORM=offscreen; fi
+          python app.py --selftest out/source
+
+      - name: 使用期限を書き込む
+        if: env.TRIAL_LAST_DAY != ''
+        shell: bash
+        run: |
+          printf '# 検証版の使用期限（この日まで使える）\nLAST_DAY = "%s"\n' "$TRIAL_LAST_DAY" > claps_titler/trial.py
+          cat claps_titler/trial.py
+
+      - name: アプリにする（PyInstaller）
+        shell: bash
+        run: |
+          python -m PyInstaller --noconfirm --windowed --name "CT Titler" --icon icon.png \
+            --osx-bundle-identifier jp.claps.cttitler \
+            --hidden-import claps_titler.trial \
+            --add-data "claps_titler/icon.png:claps_titler" \
+            app.py
+
+      - name: 動作テスト（アプリ版・Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\CT Titler\CT Titler.exe" -ArgumentList "--selftest", "$PWD\out\frozen" -Wait -PassThru
+          Get-Content out\frozen\selftest.json
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: 動作テスト（アプリ版・Mac）
+        if: runner.os == 'macOS'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          "dist/CT Titler.app/Contents/MacOS/CT Titler" --selftest "$PWD/out/frozen"
+          cat out/frozen/selftest.json
+
+      - name: zip にまとめる（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Compress-Archive -Path "dist\CT Titler" -DestinationPath "${{ matrix.pkg }}.zip"
+
+      - name: zip にまとめる（Mac）
+        if: runner.os == 'macOS'
+        run: ditto -c -k --sequesterRsrc --keepParent "dist/CT Titler.app" "${{ matrix.pkg }}.zip"
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.pkg }}
+          path: ${{ matrix.pkg }}.zip
+
+      - uses: actions/upload-artifact@v5
+        if: always()
+        with:
+          name: test-${{ matrix.pkg }}
+          path: out/

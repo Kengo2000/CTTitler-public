@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+build/
+dist/
+out/
+*.spec
+icon.png
+claps_titler/trial.py
+.DS_Store
